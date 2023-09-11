@@ -19,6 +19,7 @@ const (
 	Snell
 	Socks5
 	Http
+	Vless
 	Vmess
 	Trojan
 
@@ -32,6 +33,7 @@ const (
 const (
 	DefaultTCPTimeout = 5 * time.Second
 	DefaultUDPTimeout = DefaultTCPTimeout
+	DefaultTLSTimeout = DefaultTCPTimeout
 )
 
 type Connection interface {
@@ -93,7 +95,6 @@ type ProxyAdapter interface {
 	// DialContext return a C.Conn with protocol which
 	// contains multiplexing-related reuse logic (if any)
 	DialContext(ctx context.Context, metadata *Metadata, opts ...dialer.Option) (Conn, error)
-
 	ListenPacketContext(ctx context.Context, metadata *Metadata, opts ...dialer.Option) (PacketConn, error)
 
 	// Unwrap extracts the proxy from a proxy-group. It returns nil when nothing to extract.
@@ -101,8 +102,9 @@ type ProxyAdapter interface {
 }
 
 type DelayHistory struct {
-	Time  time.Time `json:"time"`
-	Delay uint16    `json:"delay"`
+	Time      time.Time `json:"time"`
+	Delay     uint16    `json:"delay"`
+	MeanDelay uint16    `json:"meanDelay"`
 }
 
 type Proxy interface {
@@ -110,7 +112,7 @@ type Proxy interface {
 	Alive() bool
 	DelayHistory() []DelayHistory
 	LastDelay() uint16
-	URLTest(ctx context.Context, url string) (uint16, error)
+	URLTest(ctx context.Context, url string) (uint16, uint16, error)
 
 	// Deprecated: use DialContext instead.
 	Dial(metadata *Metadata) (Conn, error)
@@ -139,6 +141,8 @@ func (at AdapterType) String() string {
 		return "Socks5"
 	case Http:
 		return "Http"
+	case Vless:
+		return "Vless"
 	case Vmess:
 		return "Vmess"
 	case Trojan:

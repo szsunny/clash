@@ -3,6 +3,7 @@ package fakeip
 import (
 	"errors"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/Dreamacro/clash/common/cache"
@@ -15,11 +16,12 @@ type store interface {
 	PutByHost(host string, ip net.IP)
 	GetByIP(ip net.IP) (string, bool)
 	PutByIP(ip net.IP, host string)
+	DelByIP(ip net.IP)
 	Exist(ip net.IP) bool
 	CloneTo(store)
 }
 
-// Pool is a implementation about fake ip generator without storage
+// Pool is an implementation about fake ip generator without storage
 type Pool struct {
 	max     uint32
 	min     uint32
@@ -35,6 +37,9 @@ type Pool struct {
 func (p *Pool) Lookup(host string) net.IP {
 	p.mux.Lock()
 	defer p.mux.Unlock()
+
+	// RFC4343: DNS Case Insensitive, we SHOULD return result with all cases.
+	host = strings.ToLower(host)
 	if ip, exist := p.store.GetByHost(host); exist {
 		return ip
 	}
@@ -94,18 +99,21 @@ func (p *Pool) CloneFrom(o *Pool) {
 func (p *Pool) get(host string) net.IP {
 	current := p.offset
 	for {
-		p.offset = (p.offset + 1) % (p.max - p.min)
-		// Avoid infinite loops
-		if p.offset == current {
-			break
-		}
-
-		ip := uintToIP(p.min + p.offset - 1)
+		ip := uintToIP(p.min + p.offset)
 		if !p.store.Exist(ip) {
 			break
 		}
+
+		p.offset = (p.offset + 1) % (p.max - p.min)
+		// Avoid infinite loops
+		if p.offset == current {
+			p.offset = (p.offset + 1) % (p.max - p.min)
+			ip := uintToIP(p.min + p.offset)
+			p.store.DelByIP(ip)
+			break
+		}
 	}
-	ip := uintToIP(p.min + p.offset - 1)
+	ip := uintToIP(p.min + p.offset)
 	p.store.PutByIP(ip, host)
 	return ip
 }
@@ -160,7 +168,7 @@ func New(options Options) (*Pool, error) {
 		}
 	} else {
 		pool.store = &memoryStore{
-			cache: cache.NewLRUCache(cache.WithSize(options.Size * 2)),
+			cache: cache.New(cache.WithSize(options.Size * 2)),
 		}
 	}
 

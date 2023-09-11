@@ -18,7 +18,7 @@ import (
 	C "github.com/Dreamacro/clash/constant"
 	"github.com/Dreamacro/clash/constant/provider"
 	"github.com/Dreamacro/clash/dns"
-	P "github.com/Dreamacro/clash/listener"
+	"github.com/Dreamacro/clash/listener"
 	authStore "github.com/Dreamacro/clash/listener/auth"
 	"github.com/Dreamacro/clash/log"
 	"github.com/Dreamacro/clash/tunnel"
@@ -73,37 +73,41 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateHosts(cfg.Hosts)
 	updateProfile(cfg)
 	updateGeneral(cfg.General, force)
+	updateInbounds(cfg.Inbounds, force)
 	updateDNS(cfg.DNS)
 	updateExperimental(cfg)
+	updateTunnels(cfg.Tunnels)
 }
 
 func GetGeneral() *config.General {
-	ports := P.GetPorts()
+	ports := listener.GetPorts()
 	authenticator := []string{}
 	if auth := authStore.Authenticator(); auth != nil {
 		authenticator = auth.Users()
 	}
 
 	general := &config.General{
-		Inbound: config.Inbound{
-			Port:           ports.Port,
-			SocksPort:      ports.SocksPort,
-			RedirPort:      ports.RedirPort,
-			TProxyPort:     ports.TProxyPort,
-			MixedPort:      ports.MixedPort,
-			Authentication: authenticator,
-			AllowLan:       P.AllowLan(),
-			BindAddress:    P.BindAddress(),
+		LegacyInbound: config.LegacyInbound{
+			Port:        ports.Port,
+			SocksPort:   ports.SocksPort,
+			RedirPort:   ports.RedirPort,
+			TProxyPort:  ports.TProxyPort,
+			MixedPort:   ports.MixedPort,
+			AllowLan:    listener.AllowLan(),
+			BindAddress: listener.BindAddress(),
 		},
-		Mode:     tunnel.Mode(),
-		LogLevel: log.Level(),
-		IPv6:     !resolver.DisableIPv6,
+		Authentication: authenticator,
+		Mode:           tunnel.Mode(),
+		LogLevel:       log.Level(),
+		IPv6:           !resolver.DisableIPv6,
 	}
 
 	return general
 }
 
-func updateExperimental(c *config.Config) {}
+func updateExperimental(c *config.Config) {
+	tunnel.UDPFallbackMatch.Store(c.Experimental.UDPFallbackMatch)
+}
 
 func updateDNS(c *config.DNS) {
 	if !c.Enable {
@@ -126,8 +130,9 @@ func updateDNS(c *config.DNS) {
 			IPCIDR:    c.FallbackFilter.IPCIDR,
 			Domain:    c.FallbackFilter.Domain,
 		},
-		Default: c.DefaultNameserver,
-		Policy:  c.NameServerPolicy,
+		Default:       c.DefaultNameserver,
+		Policy:        c.NameServerPolicy,
+		SearchDomains: c.SearchDomains,
 	}
 
 	r := dns.NewResolver(cfg)
@@ -141,14 +146,7 @@ func updateDNS(c *config.DNS) {
 	resolver.DefaultResolver = r
 	resolver.DefaultHostMapper = m
 
-	if err := dns.ReCreateServer(c.Listen, r, m); err != nil {
-		log.Errorln("Start DNS server error: %s", err.Error())
-		return
-	}
-
-	if c.Listen != "" {
-		log.Infoln("DNS server listening at: %s", c.Listen)
-	}
+	dns.ReCreateServer(c.Listen, r, m)
 }
 
 func updateHosts(tree *trie.DomainTrie) {
@@ -163,12 +161,27 @@ func updateRules(rules []C.Rule) {
 	tunnel.UpdateRules(rules)
 }
 
+func updateTunnels(tunnels []config.Tunnel) {
+	listener.PatchTunnel(tunnels, tunnel.TCPIn(), tunnel.UDPIn())
+}
+
+func updateInbounds(inbounds []C.Inbound, force bool) {
+	if !force {
+		return
+	}
+	tcpIn := tunnel.TCPIn()
+	udpIn := tunnel.UDPIn()
+
+	listener.ReCreateListeners(inbounds, tcpIn, udpIn)
+}
+
 func updateGeneral(general *config.General, force bool) {
 	log.SetLevel(general.LogLevel)
 	tunnel.SetMode(general.Mode)
 	resolver.DisableIPv6 = !general.IPv6
 
 	dialer.DefaultInterface.Store(general.Interface)
+	dialer.DefaultRoutingMark.Store(int32(general.RoutingMark))
 
 	iface.FlushCache()
 
@@ -177,33 +190,19 @@ func updateGeneral(general *config.General, force bool) {
 	}
 
 	allowLan := general.AllowLan
-	P.SetAllowLan(allowLan)
+	listener.SetAllowLan(allowLan)
 
 	bindAddress := general.BindAddress
-	P.SetBindAddress(bindAddress)
+	listener.SetBindAddress(bindAddress)
 
-	tcpIn := tunnel.TCPIn()
-	udpIn := tunnel.UDPIn()
-
-	if err := P.ReCreateHTTP(general.Port, tcpIn); err != nil {
-		log.Errorln("Start HTTP server error: %s", err.Error())
+	ports := listener.Ports{
+		Port:       general.Port,
+		SocksPort:  general.SocksPort,
+		RedirPort:  general.RedirPort,
+		TProxyPort: general.TProxyPort,
+		MixedPort:  general.MixedPort,
 	}
-
-	if err := P.ReCreateSocks(general.SocksPort, tcpIn, udpIn); err != nil {
-		log.Errorln("Start SOCKS server error: %s", err.Error())
-	}
-
-	if err := P.ReCreateRedir(general.RedirPort, tcpIn, udpIn); err != nil {
-		log.Errorln("Start Redir server error: %s", err.Error())
-	}
-
-	if err := P.ReCreateTProxy(general.TProxyPort, tcpIn, udpIn); err != nil {
-		log.Errorln("Start TProxy server error: %s", err.Error())
-	}
-
-	if err := P.ReCreateMixed(general.MixedPort, tcpIn, udpIn); err != nil {
-		log.Errorln("Start Mixed(http and socks) server error: %s", err.Error())
-	}
+	listener.ReCreatePortsListeners(ports, tunnel.TCPIn(), tunnel.UDPIn())
 }
 
 func updateUsers(users []auth.AuthUser) {
